@@ -1,0 +1,202 @@
+name: Build Geode Mod Win64 (short paths)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Only installs the small Geode CLI here. We intentionally DO NOT use
+      # geode-sdk/build-geode-mod because that action puts the SDK under
+      # github.workspace, which can exceed Windows MAX_PATH for very long repo names.
+      - name: Setup Geode CLI
+        uses: geode-sdk/cli/.github/actions/setup@main
+        with:
+          version: latest
+
+      - name: Copy project to a short path
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $projectRoot = 'C:\p'
+          $extractRoot = 'C:\x'
+          Remove-Item $projectRoot -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $projectRoot | Out-Null
+
+          # Prefer an already-extracted Geode project.
+          $candidates = Get-ChildItem -Path . -Recurse -File -Filter 'CMakeLists.txt' -Force |
+            Where-Object { $_.FullName -notmatch '\\(build|build-core|build-release|_build|\.git)\\' } |
+            ForEach-Object {
+              $dir = $_.Directory.FullName
+              if (Test-Path (Join-Path $dir 'mod.json')) { $dir }
+            } |
+            Select-Object -Unique
+
+          $source = $null
+          if ($candidates.Count -gt 0) {
+            $repoRoot = (Resolve-Path '.').Path
+            $source = $candidates | Where-Object { $_ -eq $repoRoot } | Select-Object -First 1
+            if (-not $source) {
+              if ($candidates.Count -gt 1) {
+                Write-Host 'Multiple extracted Geode projects found:'
+                $candidates | ForEach-Object { Write-Host "  $_" }
+                throw 'Keep only one extracted Geode project, or put the desired project at repo root.'
+              }
+              $source = $candidates[0]
+            }
+          }
+          else {
+            # Otherwise accept exactly one source ZIP anywhere in the repo.
+            $zips = Get-ChildItem -Path . -Recurse -File -Filter '*.zip' -Force |
+              Where-Object { $_.FullName -notmatch '\\(build|build-core|build-release|_build|\.git)\\' }
+
+            if ($zips.Count -eq 0) {
+              throw 'No Geode project found. Put an extracted project (CMakeLists.txt + mod.json) or one source ZIP in the repo.'
+            }
+            if ($zips.Count -gt 1) {
+              Write-Host 'Multiple ZIP files found:'
+              $zips | ForEach-Object { Write-Host "  $($_.FullName)" }
+              throw 'Keep only one source ZIP in the repo.'
+            }
+
+            New-Item -ItemType Directory -Path $extractRoot | Out-Null
+            Expand-Archive -Path $zips[0].FullName -DestinationPath $extractRoot -Force
+
+            $inside = Get-ChildItem -Path $extractRoot -Recurse -File -Filter 'CMakeLists.txt' -Force |
+              ForEach-Object {
+                $dir = $_.Directory.FullName
+                if (Test-Path (Join-Path $dir 'mod.json')) { $dir }
+              } |
+              Select-Object -Unique
+
+            if ($inside.Count -ne 1) {
+              Write-Host 'Geode project candidates inside ZIP:'
+              $inside | ForEach-Object { Write-Host "  $_" }
+              throw 'The ZIP must contain exactly one Geode project.'
+            }
+            $source = $inside[0]
+          }
+
+          Write-Host "Source found at: $source"
+
+          # Copy to C:\p so every compiler/SDK path stays short.
+          Copy-Item -Path (Join-Path $source '*') -Destination $projectRoot -Recurse -Force
+
+          if (-not (Test-Path 'C:\p\CMakeLists.txt') -or -not (Test-Path 'C:\p\mod.json')) {
+            throw 'Short-path copy failed: C:\p is not a valid Geode project.'
+          }
+
+          $mod = Get-Content 'C:\p\mod.json' -Raw | ConvertFrom-Json
+          $safeId = (($mod.id | Out-String).Trim() -replace '[^A-Za-z0-9._-]', '_')
+          $safeVersion = (($mod.version | Out-String).Trim() -replace '[^A-Za-z0-9._-]', '_')
+          if (-not $safeId) { $safeId = 'geode-mod' }
+          if (-not $safeVersion) { $safeVersion = 'build' }
+          "ARTIFACT_NAME=$safeId-$safeVersion-Win64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          $cmakeText = Get-Content 'C:\p\CMakeLists.txt' -Raw
+          $runCore = $cmakeText -match 'PULSE_CORE_ONLY'
+          "RUN_CORE_TESTS=$($runCore.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Setup short-path Geode SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export CLI_PROFILE="C:/gp"
+          mkdir -p "$CLI_PROFILE/geode/mods"
+          mkdir -p "C:/cpm"
+
+          # Same setup the official build action performs, but at C:\g instead
+          # of the (very long) GitHub workspace path.
+          geode profile add --name GithubActions "$CLI_PROFILE/GeometryDash.exe" win
+          geode sdk install "C:/g"
+          export GEODE_SDK="C:/g"
+          echo "GEODE_SDK=C:/g" >> "$GITHUB_ENV"
+          echo "CPM_SOURCE_CACHE=C:/cpm" >> "$GITHUB_ENV"
+
+          geode sdk update v5.10.1
+          geode sdk install-binaries --platform win
+
+      - name: Install Ninja to short path
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = 'C:\ninja.zip'
+          $dir = 'C:\ninja'
+          Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+          Invoke-WebRequest -Uri 'https://github.com/ninja-build/ninja/releases/latest/download/ninja-win.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $dir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Configure standalone tests
+        if: env.RUN_CORE_TESTS == 'true'
+        shell: pwsh
+        run: |
+          cmake -S C:\p -B C:\t -DPULSE_CORE_ONLY=ON -DBUILD_TESTING=ON
+
+      - name: Build standalone tests
+        if: env.RUN_CORE_TESTS == 'true'
+        shell: pwsh
+        run: |
+          cmake --build C:\t --config Release
+
+      - name: Run standalone tests
+        if: env.RUN_CORE_TESTS == 'true'
+        shell: pwsh
+        run: |
+          ctest --test-dir C:\t -C Release --output-on-failure
+
+      - name: Configure Pulse / Geode Win64
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf C:/b
+          cmake -S C:/p -B C:/b \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            '-DGEODE_CODEGEN_CMAKE_ARGS=-DCMAKE_C_COMPILER=clang;-DCMAKE_CXX_COMPILER=clang++;-G Ninja' \
+            -DGEODE_DONT_INSTALL_MODS=ON \
+            -DGEODE_TARGET_PLATFORM=Win64 \
+            -DBUILD_TESTING=OFF
+
+      - name: Build .geode
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build C:/b --config Release --parallel
+
+      - name: Collect compiled .geode
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'geode-artifact'
+          Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $out | Out-Null
+
+          $files = Get-ChildItem -Path 'C:\b' -Recurse -File -Filter '*.geode'
+          if ($files.Count -eq 0) {
+            throw 'Build completed but no .geode file was found under C:\b.'
+          }
+
+          foreach ($file in $files) {
+            Copy-Item $file.FullName -Destination (Join-Path $out $file.Name) -Force
+            Write-Host "Collected: $($file.FullName)"
+          }
+
+      - name: Upload compiled .geode
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/geode-artifact/*.geode
+          if-no-files-found: error
