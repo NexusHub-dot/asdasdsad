@@ -1,0 +1,97 @@
+# Pulse Macro 1.3.6 validation
+
+Release build and all five CTest suites pass. Windows x64 GD 2.2081 / Geode 5.10.1; startup integration harness OFF.
+
+Evidence: the latest game log loads alan.pulse_macro v1.3.4 and reports Cobwebs position desync after approximately 26 seconds. The full tape contains 7214 steps / 202 inputs. P2 recorded X changes from 11931.9863 to zero at step 5991, 24.9625 seconds. The old checker always compared both players and did not report drift magnitude or active dual state. An inactive-player false stop is plausible, not confirmed as the exact cause of this replay failure.
+
+Playback now passes native m_gameState.m_isDualMode to the core checker. Outside dual mode, P2 coordinates are ignored; P1 and timing remain checked. Dual mode checks both players. Errors report step, distances, and limit. The existing threshold uses Euclidean distance, and earlier per-axis wording is corrected.
+
+New regression verifies a dormant P2 coordinate difference of approximately 12,000 units does not stop single-player playback, the same mismatch rejects in dual mode without consuming a tick, and P1 mismatch/timing changes still reject. Existing speed/FPS, library, pause/practice, and analyzer suites remain passing.
+
+No live UI/game testing was performed, as requested. The exact cause of the user's stop and behavior of this fix in GD remain unverified. The new diagnostic message is intended to make any remaining failure identifiable. Existing saves and analysis data are unchanged.
+
+
+1.3.6 frame-analysis regression: validation poses now carry dual-mode metadata for new references. Legacy references use the replay's current dual state. P1 position/Y-velocity are always checked; P2 position/Y-velocity are checked only while dual is active. Core tests cover dormant-P2 acceptance, dual-P2 rejection, P1 rejection, and recorded dual-state mismatch.
+
+Pulse 1.3.9 regression:
+- Completed references are judged by survival through the recorded endpoint.
+- PlayLayer::levelComplete is accepted when emitted but is not required during analysis test mode.
+- This prevents a valid replay that visibly reaches 100% from timing out and being mislabeled as a reference desync.
+- Candidate deaths before the endpoint still fail normally; baseline pose validation remains active.
+
+1.3.11 live-log diagnosis:
+- First candidate reached input 1 offset -1, endpoint 143, and failed naturally at physics tick 91.
+- Only after that completed candidate did the analyzer abort on pre-shift pose step 60 during the next reset.
+- Candidate Early/Late pre-shift poses are therefore re-established per trial; final baseline remains strict and no physics correction is applied.
+
+
+Pulse 1.3.12 regression:
+- A stable repeated failure remains a normal failed boundary.
+- If the repeated trial survives or dies at a different tick, analysis does not abort.
+- The boundary is conservatively accepted as a failure using the first observed failure tick, so uncertainty cannot widen the measured window.
+- The analysis is flagged uncertain and the UI warns at completion that saved results could be inaccurate.
+- Baseline, scheduler, and TPS incompatibility failures remain fatal.
+
+
+Pulse 1.4.1 checkpoint-cache continuation:
+- Source version bumped to v1.4.1 for GD 2.2081 / Geode 5.10.1.
+- Cached candidate restores now explicitly set PlayLayer::m_currentCheckpoint to the analyzer-owned CheckpointObject before resetLevel().
+- Full-start fallback and analysis cleanup clear the private checkpoint array/current pointer before resetLevelFromStart(), preventing a stale analysis checkpoint from leaking into a supposed level-start reset.
+- Fresh-install checkpoint spacing is 180 ticks (0.75 s); the existing 128-snapshot cap still automatically widens spacing for long references.
+- Analysis progress now includes current input/offset, checkpoint/start origin, elapsed time, and a rough ETA after at least three completed inputs.
+- last-analysis.json includes checkpointCount in addition to restores/full restarts/physics updates/fallbacks.
+- The source includes a GitHub Actions Win64 Release workflow using geode-sdk/build-geode-mod with SDK v5.10.1.
+- Standalone/core tests: six of six pass after these changes.
+- No live GD test and no fresh .geode compilation were performed in this sandbox; Geode's Windows cross-toolchain/SDK is not installed here.
+
+Pulse 1.4.3 candidate-aware checkpoint acceleration:
+- Search semantics verified: each side stops at its first failure; early failure switches to late, and late failure advances to the next input.
+- Failed boundaries still receive one confirmation replay before the search state advances.
+- Candidate restore selection uses min(original tick, shifted tick) - 12, so no checkpoint can be after either the original or shifted target event.
+- Input-aware planning preserves universal T-32 anchors first, then uses spare capacity for T-13/T-16/T-20/T-24/T-28 candidate tiers.
+- Default/hard analysis checkpoint limit is 256; the setting may be lowered to 32 for memory-heavy levels.
+- Overlapping 60-tick checkpoint validation windows are all captured from the opening baseline; dense checkpoints no longer starve older checkpoints of validation samples.
+- Standalone/core CTest: 6/6 pass, including candidate-boundary safety, dense-plan cap/ordering, overlay equivalence, held-input restoration metadata, and first-failure search progression.
+- No live GD run or Win64 link was performed in this Linux sandbox.
+
+
+Pulse 1.4.6 playback repair:
+- clean original retry is required before any edit; a non-reproducible death is not modified
+- same-channel press/release ordering is enforced for shifted repair events
+- recent jump-transition candidates are searched newest-first
+- every candidate must survive the full suffix / recorded endpoint
+- the center of the widest contiguous passing offset region is selected
+- the winner gets a final full-route confirmation before save
+- successful confirmation captures a new complete trajectory, preserving later position validation
+- atomic save keeps the original macro as .bak
+- helper regression tests cover shift legality, event ordering, candidate selection, and robust-center choice
+
+
+Pulse 1.4.8 stable-library / timing-filter / UX cleanup:
+- Positive online/official level IDs use a stable Pulse macro key. Legacy per-level-string variants are discovered per slot, the newest valid take is migrated without rewriting it, and duplicate variants are retired instead of continuing to split the library.
+- Local and non-positive placeholder IDs remain content-keyed; regression coverage verifies they do not merge unrelated local level data.
+- Frame Windows input metadata now records the player mode at every transition. All transitions are still replayed, but cube/ball/UFO/spider/swing releases are ignored as standalone frame-window timings; ship/wave/robot releases remain measurable.
+- Search, histogram counts, precision, circles, progress/ETA, and input-aware checkpoint planning all use the same timing-eligibility rule.
+- Next-action scope now advances to the next meaningful timing for the same player instead of the next raw transition.
+- Frame Window analysisVersion is 5. Older reference inputs remain loadable, while prior widths are cleared so the opening baseline can relearn mode metadata before re-analysis.
+- Normal HUD defaults to a transparent compact grouped counter with a NaN-style grouped palette; a detailed panel remains available by disabling Minimal counter.
+- Pulse and Frame Windows popups have clearer action labels and built-in help. User-facing naming is consistently "Frame Windows".
+- Analysis diagnostics now record ignored/replay-only transitions, and analysis progress excludes them from target counts and ETA.
+- mod.json parses successfully. Fresh standalone/core build and CTest are required before packaging; Win64 Geode/native-hook validation is still delegated to the included GitHub Actions workflow and in-game testing.
+
+Pulse 1.4.9 frame-window methodology audit and final source verification:
+- Source version is v1.4.9 for GD 2.2081 / Geode 5.10.1 / Win64.
+- Frame-window width uses inclusive discrete timing positions: early + late + 1. A passing range -3..+2 is 6f.
+- Candidate event crossings are simulated with stable ordering instead of being rejected artificially.
+- Opening/candidate prefix validation uses immutable baseline evidence rather than rewriting expected poses from each reset.
+- Default next-action analysis executes the next meaningful input group and then a configurable settling suffix (default 4 whole 240 Hz steps).
+- Completed references require actual completion/end-sequence evidence; prefix references may pass by surviving their recorded endpoint.
+- Hidden checkpoint restores retain analyzer cursors/latches, both GD RNG seeds, native queued commands, and both players' native holding maps. Candidate selection remains before both original and shifted target timings.
+- Final-validation warnings persist through save/load/export; unverified results suppress the precision success display.
+- Developer modes include Force full restart analysis, Compare checkpoints versus full restart, and Strict validation.
+- Exports include per-input CSV, per-trial CSV, histogram CSV, accelerated/full-restart evidence, and restart-diff CSV.
+- New audit/diagnostic tests cover the requested edge cases, including width semantics, first-failure stopping, replay-only releases, mode-aware releases, event crossings, dual/P2 handling, checkpoint/full-start equivalence, final-warning preservation, endpoint tradeoffs, and dense inputs.
+- Local verification performed on this recovered source: clean PULSE_CORE_ONLY configure/build succeeded and CTest passed 8/8 suites, including the Python comparison suite. tools/compare_windows.py --help and its five Python unit tests also succeeded.
+- The supplied Astra session transcript reports that its Win64 Geode build compiled and packaged successfully. This recovery session did not independently re-link the Windows native mod or launch Geometry Dash.
+- Live Geometry Dash accuracy and native checkpoint fidelity remain unverified until tested in-game on the same saved reference. Matching another counter's histogram alone is not proof of correctness.
+- The bundled GitHub Actions workflow was replaced with the short-path builder (C:\\p project, C:\\g SDK, C:\\b build) because the user's extremely long repository name previously exceeded Windows MAX_PATH during Geode SDK checkout.
